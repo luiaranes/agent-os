@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent OS</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #14120e;
+        --panel: #1d1a16;
+        --line: #3a342c;
+        --text: #f3efe6;
+        --muted: #b3a898;
+        --accent: #e2a15a;
+        --ok: #8fbf7a;
+        --bad: #e07a6a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 15px/1.45 "Iowan Old Style", Palatino, Georgia, serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header, main { padding: 20px 24px; }
+      header { border-bottom: 1px solid var(--line); }
+      h1 { margin: 0; font-size: 22px; font-weight: 600; }
+      p { margin: 6px 0 0; color: var(--muted); }
+      .banner {
+        margin-top: 14px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        background: #2a241c;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        gap: 20px;
+        min-height: calc(100vh - 120px);
+      }
+      form, .list, .detail {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        padding: 14px;
+      }
+      label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
+      input, textarea, button {
+        width: 100%;
+        font: inherit;
+        color: var(--text);
+        background: #100e0c;
+        border: 1px solid var(--line);
+        padding: 8px;
+      }
+      textarea { min-height: 110px; resize: vertical; }
+      button {
+        margin-top: 12px;
+        background: var(--accent);
+        color: #1a1208;
+        border: 0;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .session {
+        width: 100%;
+        text-align: left;
+        margin-top: 8px;
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--line);
+      }
+      .session.active { border-color: var(--accent); }
+      .status { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+      .status.running, .status.starting, .status.idle { color: var(--accent); }
+      a { color: var(--accent); }
+      .status.done { color: var(--ok); }
+      .status.error, .status.stopped { color: var(--bad); }
+      .meta { color: var(--muted); font-size: 13px; margin-top: 8px; }
+      .transcript {
+        white-space: pre-wrap;
+        margin: 12px 0 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+      }
+      .error { color: var(--bad); min-height: 1.2em; }
+      @media (max-width: 800px) {
+        main { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Agent OS</h1>
+      <p>Sessions on this laptop. They pause if the machine sleeps.</p>
+      <div class="banner" id="banner"></div>
+    </header>
+    <main>
+      <section>
+        <div id="project-header"></div>
+        <form id="create">
+          <div id="home-fields">
+            <label for="folder">Folder</label>
+            <input id="folder" name="folder" required />
+          </div>
+          <div id="session-fields" hidden>
+            <label for="title">Title</label>
+            <input id="title" name="title" required placeholder="Landing page copy" />
+            <label for="prompt">Prompt, optional</label>
+            <textarea id="prompt" name="prompt" placeholder="Leave empty and send the first message from the Claude app."></textarea>
+          </div>
+          <p class="error" id="form-error"></p>
+          <button type="submit" id="submit">Add project</button>
+        </form>
+        <div class="list" id="list" style="margin-top: 16px"></div>
+      </section>
+      <section class="detail" id="detail">
+        <p class="meta">Select a session.</p>
+      </section>
+    </main>
+    <script type="module">
+      const sessions = new Map();
+      let projects = [];
+      let selectedId = null;
+      let defaultCwd = "";
+      let remoteControl = { available: false, detail: "Checking Remote Control…" };
+      let lastPageId = null;
+
+      const banner = document.querySelector("#banner");
+      const list = document.querySelector("#list");
+      const detail = document.querySelector("#detail");
+      const formError = document.querySelector("#form-error");
+      const projectHeader = document.querySelector("#project-header");
+      const homeFields = document.querySelector("#home-fields");
+      const sessionFields = document.querySelector("#session-fields");
+      const submitButton = document.querySelector("#submit");
+      const folderInput = document.querySelector("#folder");
+
+      function pageProjectId() {
+        return location.hash.slice(1);
+      }
+
+      function renderBanner() {
+        banner.textContent = remoteControl.detail;
+      }
+
+      function renderDetail() {
+        const session = selectedId ? sessions.get(selectedId) : null;
+        if (!session) {
+          detail.innerHTML = "<p class='meta'>Select a session.</p>";
+          return;
+        }
+        const cost = session.costUsd == null ? "" : ` · $${Number(session.costUsd).toFixed(4)}`;
+        const lines = (session.transcript ?? []).map((line) => escapeHtml(line.body)).join("\n\n");
+        detail.innerHTML = `
+          <div class="status ${session.status}">${session.status}${cost}</div>
+          <h2>${escapeHtml(session.title)}</h2>
+          <p class="meta">${escapeHtml(session.cwd)}</p>
+          ${session.remoteUrl ? `<p><a href="${escapeHtml(session.remoteUrl)}" target="_blank" rel="noreferrer">Open in the Claude app</a></p>` : ""}
+          ${session.prompt ? `<p>${escapeHtml(session.prompt)}</p>` : "<p class='meta'>Waiting for a message from the Claude app.</p>"}
+          ${session.error ? `<p class="error">${escapeHtml(session.error)}</p>` : ""}
+          <button class="secondary" id="stop" type="button" ${["running", "starting", "idle"].includes(session.status) ? "" : "disabled"}>Stop</button>
+          <pre class="transcript">${lines || "Waiting for output…"}</pre>
+        `;
+        document.querySelector("#stop").addEventListener("click", async () => {
+          await fetch(`/api/sessions/${session.id}/stop`, { method: "POST" });
+        });
+      }
+
+      function render() {
+        const id = pageProjectId();
+        if (id !== lastPageId) {
+          formError.textContent = "";
+          lastPageId = id;
+        }
+
+        if (!id) {
+          setFieldsDisabled(homeFields, false);
+          setFieldsDisabled(sessionFields, true);
+          submitButton.disabled = false;
+          projectHeader.innerHTML = "";
+          homeFields.hidden = false;
+          sessionFields.hidden = true;
+          submitButton.textContent = "Add project";
+          detail.hidden = true;
+
+          list.innerHTML = "";
+          if (projects.length === 0) {
+            list.innerHTML = "<p class='meta'>No projects yet.</p>";
+            return;
+          }
+          for (const project of projects) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "session";
+            button.innerHTML = `<strong>${escapeHtml(project.name)}</strong><div class="meta">${escapeHtml(project.folder)}</div>`;
+            button.addEventListener("click", () => {
+              location.hash = project.id;
+            });
+            list.appendChild(button);
+          }
+          return;
+        }
+
+        detail.hidden = false;
+        homeFields.hidden = true;
+        sessionFields.hidden = true;
+        submitButton.textContent = "Start session";
+        setFieldsDisabled(homeFields, true);
+
+        const project = projects.find((entry) => entry.id === id);
+        if (!project) {
+          setFieldsDisabled(sessionFields, true);
+          submitButton.disabled = true;
+          projectHeader.innerHTML =
+            "<p class='error'>Project not found.</p><p><a href='#'>Back to projects</a></p>";
+          list.innerHTML = "";
+          detail.innerHTML = "<p class='meta'>Select a session.</p>";
+          return;
+        }
+
+        projectHeader.innerHTML = `<h2>${escapeHtml(project.name)}</h2><p class="meta">${escapeHtml(project.folder)}</p><p><a href="#">Back to projects</a></p>`;
+        setFieldsDisabled(sessionFields, false);
+        submitButton.disabled = false;
+        sessionFields.hidden = false;
+
+        const rows = [...sessions.values()]
+          .filter((session) => session.projectId === id)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        if (selectedId && !rows.some((session) => session.id === selectedId)) {
+          selectedId = null;
+        }
+
+        list.innerHTML = "";
+        if (rows.length === 0) {
+          list.innerHTML = "<p class='meta'>No sessions yet.</p>";
+        } else {
+          for (const session of rows) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "session" + (session.id === selectedId ? " active" : "");
+            button.innerHTML = `<div class="status ${session.status}">${session.status}</div><strong>${escapeHtml(session.title)}</strong>`;
+            button.addEventListener("click", () => {
+              selectedId = session.id;
+              render();
+            });
+            list.appendChild(button);
+          }
+        }
+        renderDetail();
+      }
+
+      function mergeSession(session) {
+        const previous = sessions.get(session.id);
+        sessions.set(session.id, {
+          ...previous,
+          ...session,
+          transcript: session.transcript ?? previous?.transcript ?? [],
+        });
+      }
+
+      function upsert(session) {
+        mergeSession(session);
+        render();
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;");
+      }
+
+      function setFieldsDisabled(container, disabled) {
+        for (const field of container.querySelectorAll("input, textarea")) field.disabled = disabled;
+      }
+
+      document.querySelector("#create").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        formError.textContent = "";
+        const id = pageProjectId();
+
+        if (!id) {
+          const response = await fetch("/api/projects", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ folder: folderInput.value }),
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            formError.textContent = payload.error ?? "Could not add the project.";
+            return;
+          }
+          projects = [...projects, payload].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+          location.hash = payload.id;
+          return;
+        }
+
+        const body = {
+          title: document.querySelector("#title").value,
+          projectId: id,
+          prompt: document.querySelector("#prompt").value,
+        };
+        const response = await fetch("/api/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          formError.textContent = payload.error ?? "Could not start the session.";
+          return;
+        }
+        selectedId = payload.id;
+        upsert(payload);
+        document.querySelector("#prompt").value = "";
+      });
+
+      window.addEventListener("hashchange", () => render());
+
+      const source = new EventSource("/api/events");
+      source.onmessage = (event) => {
+        const payload = JSON.parse(event.data);
+        if (payload.type === "session") upsert(payload.session);
+        if (payload.type === "transcript") {
+          const session = sessions.get(payload.sessionId);
+          if (!session) return;
+          session.transcript = [...(session.transcript ?? []), payload];
+          if (payload.sessionId === selectedId) renderDetail();
+        }
+      };
+
+      const state = await fetch("/api/state").then((response) => response.json());
+      remoteControl = state.remoteControl;
+      defaultCwd = state.defaultCwd;
+      folderInput.value = defaultCwd;
+      projects = state.projects;
+      renderBanner();
+      for (const session of state.sessions) mergeSession(session);
+      render();
+
+      setInterval(async () => {
+        const next = await fetch("/api/state").then((response) => response.json());
+        remoteControl = next.remoteControl;
+        projects = next.projects;
+        renderBanner();
+        for (const session of next.sessions) mergeSession(session);
+        render();
+      }, 2000);
+    </script>
+  </body>
+</html>
